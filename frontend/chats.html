@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Chats</title>
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.bundle.min.js"></script>
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+
+        .chat-item {
+            cursor: pointer;
+        }
+
+        .message {
+            max-width: 75%;
+            padding: 10px 15px;
+            margin: 5px;
+            border-radius: 20px;
+            word-wrap: break-word;
+            display: inline-block;
+        }
+
+        .sent {
+            align-self: flex-end;
+            background-color: #007bff;
+            color: white;
+            text-align: right;
+        }
+
+        .sent-text {
+            color: white;
+        }
+
+        .received {
+            align-self: flex-start;
+            background-color: #f1f0f0;
+            color: black;
+            text-align: left;
+        }
+
+        .received-text {
+            color: black;
+        }
+    </style>
+    <script>
+        function getCookie(name) {
+            let cookies = document.cookie.split('; ');
+            for (let cookie of cookies) {
+                let [key, value] = cookie.split('=');
+                if (key === name) return value;
+            }
+            return null;
+        }
+
+        $(document).ready(function () {
+            const token = getCookie("token");
+            if (!token) {
+                window.location.href = "/login.html";
+            }
+
+            let currentUser = null;
+
+            $.ajax({
+                url: "http://localhost:8000/users/me",
+                method: "GET",
+                headers: { "Authorization": "Bearer " + token },
+                success: function (user) {
+                    currentUser = user.username;
+                    $('#user-info').html(`
+                        <div class="alert alert-primary">
+                            Logged in as: <strong>${user.username}</strong>
+                        </div>
+                    `);
+                    loadChats();
+                },
+                error: function (xhr) {
+                    if (xhr.status === 401) {
+                        window.location.href = "/login.html";
+                    }
+                    console.error("Error fetching user info:", xhr.responseText);
+                }
+            });
+
+            function loadChats() {
+                $.ajax({
+                    url: "http://localhost:8000/chat/my-chats",
+                    method: "GET",
+                    headers: { "Authorization": "Bearer " + token },
+                    success: function (response) {
+                        $('#chats-list').empty();
+                        response.chats.forEach(function (chat) {
+                            let otherUsers = chat.users.filter(user => user !== currentUser);
+                            let chatName = otherUsers.length > 0 ? otherUsers.join(', ') : "Solo Chat";
+
+                            let chatItem = `
+                                <div class="card mb-2 chat-item" data-chat-id="${chat.chat_id}">
+                                    <div class="card-body">
+                                        <h5 class="card-title">${chatName}</h5>
+                                    </div>
+                                </div>
+                            `;
+                            $('#chats-list').append(chatItem);
+                        });
+
+                        $('.chat-item').click(function () {
+                            let chatId = $(this).data('chat-id');
+                            $('#send-message').data('chat-id', chatId);
+                            loadMessages(chatId);
+                            connectWebSocket(chatId);
+                        });
+                    },
+                    error: function (xhr) {
+                        if (xhr.status === 401) {
+                            window.location.href = "/login.html";
+                        }
+                        console.error("Error fetching chats:", xhr.responseText);
+                    }
+                });
+            }
+
+            function loadMessages(chatId) {
+                $('#messages-list').html('<p class="text-muted">Loading messages...</p>');
+
+                $.ajax({
+                    url: `http://localhost:8000/chat/${chatId}`,
+                    method: "GET",
+                    headers: { "Authorization": "Bearer " + token },
+                    success: function (response) {
+                        $('#messages-list').empty();
+                        let messages = response.messages;
+                        let lastFiveMessages = messages.slice(-5); // Vybere posledních 5 zpráv
+
+                        lastFiveMessages.forEach(function (msg) {
+                            let senderClass = msg.sender === currentUser ? "sent" : "received";
+                            let sendtext = msg.sender === currentUser ? "sent-text" : "received-text";
+                            let messageItem = `
+                    <div class="mb-2 ${senderClass} message">
+                        <strong>${msg.sender}:</strong> ${msg.content} <br>
+                        <small class="${sendtext}">${new Date(msg.sent_at).toLocaleTimeString()}</small>
+                    </div>
+                `;
+                            $('#messages-list').append(messageItem);
+                        });
+
+                        // Automaticky posunout na konec
+                        $('#messages-list').scrollTop($('#messages-list')[0].scrollHeight);
+                    },
+                    error: function (xhr) {
+                        if (xhr.status === 401) {
+                            window.location.href = "/login.html";
+                        }
+                        console.error("Error fetching messages:", xhr.responseText);
+                    }
+                });
+            }
+
+            let socket;
+            let currentChatId = null;
+
+            function connectWebSocket(chatId) {
+                if (socket && socket.readyState === WebSocket.OPEN && chatId === currentChatId) {
+                    console.log("WebSocket is already connected to chat:", chatId);
+                    return;
+                }
+
+                if (socket) {
+                    socket.close();
+                }
+
+                currentChatId = chatId;
+                socket = new WebSocket(`ws://localhost:8000/ws/chat/${chatId}`);
+
+                socket.onopen = function () {
+                    console.log("WebSocket connected to chat:", chatId);
+                };
+
+                socket.onerror = function (error) {
+                    console.error("WebSocket error:", error);
+                };
+
+                socket.onclose = function (event) {
+                    if (event.code !== 1000) {
+                        setTimeout(() => connectWebSocket(chatId), 5000);
+                    }
+                };
+
+                socket.onmessage = function (event) {
+                    const msg = JSON.parse(event.data);
+                    appendMessage(msg);
+                };
+            };
+
+            function appendMessage(msg) {
+                let senderClass = msg.sender === currentUser ? "sent" : "received";
+                let sendtext = msg.sender === currentUser ? "sent-text" : "received-text";
+                let messageItem = `
+                    <div class="mb-2 ${senderClass} message">
+                        <strong>${msg.sender}:</strong> ${msg.content} <br>
+                        <small class="${sendtext}">${new Date(msg.sent_at).toLocaleTimeString()}</small>
+                    </div>
+                `;
+                $('#messages-list').append(messageItem);
+            }
+
+            $('#send-message').click(function () {
+                let chatId = $(this).data('chat-id');
+                let messageContent = $('#message-input').val();
+                if (!messageContent) return;
+
+                $.ajax({
+                    url: `http://localhost:8000/chat/${chatId}`,
+                    method: "POST",
+                    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+                    data: JSON.stringify({
+                        message: messageContent
+                    }),
+                    success: function () {
+                        $('#message-input').val('');
+                        loadMessages(chatId);
+                    },
+                    error: function (xhr) {
+                        console.error("Error sending message:", xhr.responseText);
+                    }
+                });
+            });
+
+            $('#new-chat-btn').click(function () {
+            $.ajax({
+                url: "http://localhost:8000/users/users",
+                method: "GET",
+                headers: { "Authorization": "Bearer " + token },
+                success: function (users) {
+                    $('#user-list').empty();
+                    // remove current user from the list
+                    users = users.filter(user => user.username !== currentUser);
+                    users.forEach(user => {
+                        $('#user-list').append(`<option value="${user.username}">${user.username}</option>`);
+                    });
+                    $('#newChatModal').modal('show');
+                }
+            });
+        });
+
+        $('#start-chat').click(function () {
+                let selectedUser = $('#user-list').val();
+                if (!selectedUser) return;
+
+                $.ajax({
+                    url: "http://localhost:8000/chat/new",
+                    method: "POST",
+                    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+                    data: JSON.stringify({ username: selectedUser }),
+                    success: function () {
+                        $('#newChatModal').modal('hide');
+                        loadChats();
+                    },
+                    error: function (xhr) {
+                        $('#chat-error').text(xhr.responseJSON.detail.message).show();
+                    }
+                });
+            });
+
+
+        });
+
+
+    </script>
+</head>
+
+<body>
+    <div class="container mt-5">
+        <h2 class="mb-4">My Chats</h2>
+        <div id="user-info"></div>
+        <button id="new-chat-btn" class="btn btn-success mb-3">New Chat</button>
+        <div class="row">
+            <div class="col-md-4">
+                <h4>Chats</h4>
+                <div id="chats-list"></div>
+            </div>
+            <div class="col-md-8">
+                <h4>Messages</h4>
+                <div id="messages-list" class="border p-3 vh-75 overflow-auto d-flex flex-column"></div>
+                <div class="input-group mt-3">
+                    <input type="text" id="message-input" class="form-control" placeholder="Type a message...">
+                    <div class="input-group-append">
+                        <button id="send-message" class="btn btn-primary">Send</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="newChatModal" tabindex="-1" role="dialog">
+        <div class="modal-dialog" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Start New Chat</h5>
+                    <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+                </div>
+                <div class="modal-body">
+                    <select id="user-list" class="form-control"></select>
+                    <div id="chat-error" class="alert alert-danger mt-2" style="display: none;"></div>
+                </div>
+                <div class="modal-footer">
+                    <button id="start-chat" class="btn btn-primary">Start Chat</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
